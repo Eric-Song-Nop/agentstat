@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,7 +38,12 @@ func DiscoverClaude() []model.AgentSession {
 	if len(pids) == 0 {
 		return nil
 	}
-	return ConcurrentProbe(pids, probeClaudePID)
+
+	pidMap := buildPIDSessionMap(pids)
+
+	return ConcurrentProbe(pids, func(pid int) *model.AgentSession {
+		return probeClaudePID(pid, pidMap)
+	})
 }
 
 // findClaudePIDs returns PIDs of processes whose binary is "claude".
@@ -45,14 +52,119 @@ func findClaudePIDs() []int {
 	return platform.P.FindPIDsByName(re)
 }
 
+// debugFileInfo pairs a debug log path with its modification time for sorting.
+type debugFileInfo struct {
+	path    string
+	modTime time.Time
+}
+
+// buildPIDSessionMap scans ~/.claude/debug/*.txt to build a PID → SessionID mapping.
+//
+// Each debug log is named {sessionId}.txt. Inside the file, lines contain temporary
+// file references like ".tmp.{PID}." which reveal which PID owns that session.
+// Files are scanned in mtime-descending order (newest first) so active sessions
+// are found quickly. Scanning stops as soon as all target PIDs are mapped.
+func buildPIDSessionMap(pids []int) map[int]string {
+	pidMap := make(map[int]string, len(pids))
+	if len(pids) == 0 {
+		return pidMap
+	}
+
+	// Build target PID set for O(1) lookup.
+	target := make(map[int]bool, len(pids))
+	for _, pid := range pids {
+		target[pid] = true
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return pidMap
+	}
+
+	debugDir := filepath.Join(home, ".claude", "debug")
+	entries, err := os.ReadDir(debugDir)
+	if err != nil {
+		return pidMap
+	}
+
+	// Collect .txt files with their modification times.
+	var files []debugFileInfo
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".txt") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, debugFileInfo{
+			path:    filepath.Join(debugDir, e.Name()),
+			modTime: info.ModTime(),
+		})
+	}
+
+	// Sort by mtime descending — newest files first.
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime.After(files[j].modTime)
+	})
+
+	re := regexp.MustCompile(`\.tmp\.(\d+)\.`)
+	remaining := len(target)
+
+	for _, df := range files {
+		if remaining == 0 {
+			break
+		}
+
+		pid := extractPIDFromDebugLog(df.path, re, target, pidMap)
+		if pid != 0 {
+			// Derive sessionID from filename: {sessionId}.txt → {sessionId}
+			base := filepath.Base(df.path)
+			sessionID := strings.TrimSuffix(base, ".txt")
+			pidMap[pid] = sessionID
+			remaining--
+		}
+	}
+
+	return pidMap
+}
+
+// extractPIDFromDebugLog reads a debug log line-by-line looking for a .tmp.{PID}. pattern.
+// Returns the matched PID if it's in the target set and not yet mapped, otherwise 0.
+func extractPIDFromDebugLog(path string, re *regexp.Regexp, target map[int]bool, mapped map[int]string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
+
+	for scanner.Scan() {
+		matches := re.FindStringSubmatch(scanner.Text())
+		if len(matches) < 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(matches[1])
+		if err != nil {
+			continue
+		}
+		if target[pid] && mapped[pid] == "" {
+			return pid
+		}
+	}
+	return 0
+}
+
 // probeClaudePID examines a single Claude Code process and returns its session info.
-func probeClaudePID(pid int) *model.AgentSession {
-	sessionIDs := findClaudeSessionLocks(pid)
-	if len(sessionIDs) == 0 {
+func probeClaudePID(pid int, pidMap map[int]string) *model.AgentSession {
+	sessionID, ok := pidMap[pid]
+	if !ok || sessionID == "" {
 		return nil
 	}
 
-	info := resolveClaudeSession(sessionIDs)
+	info := resolveClaudeSession(sessionID)
 	if info == nil {
 		return nil
 	}
@@ -79,54 +191,32 @@ func probeClaudePID(pid int) *model.AgentSession {
 	}
 }
 
-// findClaudeSessionLocks inspects open files of a process for .claude/tasks/{uuid}/.lock
-// and returns deduplicated session UUIDs.
-func findClaudeSessionLocks(pid int) []string {
-	files := platform.P.ListOpenFiles(pid)
-
-	re := regexp.MustCompile(`/\.claude/tasks/([0-9a-f-]{36})/\.lock$`)
-	seen := make(map[string]bool)
-	var ids []string
-
-	for _, f := range files {
-		matches := re.FindStringSubmatch(f)
-		if len(matches) >= 2 && !seen[matches[1]] {
-			seen[matches[1]] = true
-			ids = append(ids, matches[1])
-		}
-	}
-	return ids
-}
-
-// resolveClaudeSession finds the JSONL file for each session ID under ~/.claude/projects/
-// and returns the one with the most recent modification time.
-func resolveClaudeSession(sessionIDs []string) *claudeSessionInfo {
+// resolveClaudeSession finds the JSONL file for a session ID under ~/.claude/projects/.
+func resolveClaudeSession(sessionID string) *claudeSessionInfo {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
 
 	projectsDir := filepath.Join(home, ".claude", "projects")
-	var best *claudeSessionInfo
+	pattern := filepath.Join(projectsDir, "*", sessionID+".jsonl")
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
 
-	for _, sid := range sessionIDs {
-		pattern := filepath.Join(projectsDir, "*", sid+".jsonl")
-		matches, err := filepath.Glob(pattern)
-		if err != nil || len(matches) == 0 {
+	// If multiple project dirs contain the same sessionID, pick the most recent.
+	var best *claudeSessionInfo
+	for _, m := range matches {
+		fi, err := os.Stat(m)
+		if err != nil {
 			continue
 		}
-
-		for _, m := range matches {
-			fi, err := os.Stat(m)
-			if err != nil {
-				continue
-			}
-			if best == nil || fi.ModTime().After(best.ModTime) {
-				best = &claudeSessionInfo{
-					SessionID: sid,
-					JSONLPath: m,
-					ModTime:   fi.ModTime(),
-				}
+		if best == nil || fi.ModTime().After(best.ModTime) {
+			best = &claudeSessionInfo{
+				SessionID: sessionID,
+				JSONLPath: m,
+				ModTime:   fi.ModTime(),
 			}
 		}
 	}

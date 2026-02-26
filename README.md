@@ -8,7 +8,7 @@ Detect and report the status of running AI coding agents on your machine.
 |-------|-----------------|
 | [OpenCode](https://github.com/opencode-ai/opencode) | HTTP API via listening port (Linux: `ss -tlnp`, macOS: `lsof`) |
 | [Codex](https://github.com/openai/codex) | Open file scan → rollout JSONL + SQLite DB (Linux: `/proc`, macOS: `lsof`) |
-| [Claude Code](https://github.com/anthropics/claude-code) | Open file scan → session lock + JSONL (Linux: `/proc`, macOS: `lsof`) |
+| [Claude Code](https://github.com/anthropics/claude-code) | Debug log PID mapping → session JSONL (via `~/.claude/debug/*.txt`) |
 
 ## Installation
 
@@ -91,7 +91,7 @@ Codex writes rollout JSONL files during active sessions. `agentstat` scans open 
 
 ### Claude Code
 
-Claude Code holds a `.lock` file under `~/.claude/tasks/{session-id}/` while running. `agentstat` scans open file descriptors (Linux: `/proc/{pid}/fd`, macOS: `lsof -p`) for these lock files, resolves the corresponding session JSONL under `~/.claude/projects/`, and reads the trailing entries to determine status (`turn_duration` → idle, `assistant`/`user` → busy).
+Claude Code writes debug logs to `~/.claude/debug/{sessionId}.txt`. These logs contain temporary file references with the pattern `.tmp.{PID}.`, which reveals which OS process owns each session. `agentstat` scans these debug logs (newest first) to build a PID→SessionID mapping, then resolves the corresponding session JSONL under `~/.claude/projects/` and reads the trailing entries to determine status (`turn_duration` → idle, `assistant`/`user` → busy). This approach detects all sessions including idle ones, unlike the previous lock-file method which only found actively executing sessions.
 
 ## Platform
 

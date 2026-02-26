@@ -29,7 +29,7 @@ Each detection method is tagged with an invasiveness label:
 | **Codex** | CLI | Process + `/proc/fd` → rollout JSONL | Last line: `task_complete` → idle | 🟡 READ-INTERNAL | ★★★★☆ |
 | **Plandex** | CLI + Server | HTTP `localhost:8099` + PostgreSQL | API: plan status | 🟢 PASSIVE | ★★★★☆ |
 | **Cline CLI** | CLI | `--json` output + file watch | `ask` msg = idle, `say` msg = busy | 🔴 LAUNCH-FLAG / 🟡 READ-INTERNAL | ★★★☆☆ |
-| **Claude Code** | CLI | Process + `/proc/fd` → session JSONL | Last line: `system`+`turn_duration` → idle | 🟡 READ-INTERNAL | ★★★★☆ |
+| **Claude Code** | CLI | Process + debug log PID mapping → session JSONL | Last line: `system`+`turn_duration` → idle | 🟡 READ-INTERNAL | ★★★★☆ |
 | **Copilot CLI** | CLI | ACP TCP mode (`--acp --port N`) | JSON-RPC over TCP | 🔴 LAUNCH-FLAG | ★★★☆☆ |
 | **Amp Code** | CLI | Process + file changes directory | `~/.amp/file-changes/` transaction mtime | 🟢 PASSIVE | ★★★☆☆ |
 | **Gemini CLI** | CLI | Process + checkpoint files | CPU + `~/.gemini/tmp/` mtime | 🟢 PASSIVE | ★★★☆☆ |
@@ -127,7 +127,7 @@ SELECT id, title, directory FROM session ORDER BY updated DESC;
 | **Process name** | `claude` |
 | **Config path** | `~/.claude/settings.json` |
 | **State path** | `~/.claude/` (~1.7GB total) |
-| **Task locks** | `~/.claude/tasks/{uuid}/.lock` (per-session lock held via fd) |
+| **Debug logs** | `~/.claude/debug/{sessionId}.txt` (contains `.tmp.{PID}.` patterns) |
 | **Session JSONL** | `~/.claude/projects/{project-path-encoded}/{sessionId}.jsonl` |
 | **History** | `~/.claude/history.jsonl` |
 | **HTTP API** | None |
@@ -144,15 +144,17 @@ SELECT id, title, directory FROM session ORDER BY updated DESC;
    done
    ```
 
-2. 🟡 READ-INTERNAL — **PID → session UUID via `/proc/{pid}/fd`:**
+2. 🟡 READ-INTERNAL — **PID → session UUID via debug logs:**
    ```bash
-   # Claude holds .lock files open for each session it owns.
-   # A single PID may hold multiple locks (compact/inherited sessions).
-   readlink /proc/{pid}/fd/* 2>/dev/null | grep '\.claude/tasks/.*/\.lock'
-   # → /home/user/.claude/tasks/9a50ebfc-2e61-464f-b5fb-916d895b16f9/.lock
-   # Extract UUID from path — this is the session ID.
+   # Claude writes debug logs to ~/.claude/debug/{sessionId}.txt.
+   # These logs contain temporary file references like ".tmp.{PID}." which
+   # reveal which OS process owns each session.
+   # Scan debug logs (newest mtime first), match .tmp.{PID}. pattern:
+   grep -l "\.tmp\.$PID\." ~/.claude/debug/*.txt
+   # → /home/user/.claude/debug/9a50ebfc-2e61-464f-b5fb-916d895b16f9.txt
+   # Filename (minus .txt) is the session ID.
    ```
-   > One PID can hold multiple session locks. Take the session whose JSONL has the most recent mtime.
+   > Unlike the old lock-file approach, this detects **all** sessions including idle ones.
 
 3. 🟡 READ-INTERNAL — **Session UUID → JSONL file:**
    ```bash
@@ -843,7 +845,7 @@ Agents with queryable local databases. **No startup changes needed, but reads un
 | Agent | Database | Query Target | Breakage Risk |
 |-------|----------|-------------|---------------|
 | OpenCode | `~/.local/share/opencode/opencode.db` | `session` table | Low (also has API) |
-| Claude Code | `/proc/{pid}/fd` → session JSONL | `type`+`subtype` in last line | **Medium** (file format stable, fd approach reliable) |
+| Claude Code | `~/.claude/debug/*.txt` → session JSONL | `type`+`subtype` in last line | **Medium** (file format stable, debug log approach reliable) |
 | Codex | `/proc/{pid}/fd` → rollout JSONL | `payload.type` in last line | **Medium** (file format stable, fd approach reliable) |
 | Goose | `~/.config/goose/sessions.db` | sessions | Low (also has API) |
 | Cursor | `~/.config/Cursor/.../state.vscdb` | `composer.composerData` key | **High** (undocumented key) |
