@@ -118,6 +118,19 @@ func (d *darwinPlatform) ReadProcessCwd(pid int) string {
 	return "-"
 }
 
+// ReadProcessPPID returns the parent PID by running `ps -o ppid= -p PID`.
+func (d *darwinPlatform) ReadProcessPPID(pid int) int {
+	out, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return 0
+	}
+	ppid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0
+	}
+	return ppid
+}
+
 // FindListenTCP runs `lsof -iTCP -sTCP:LISTEN -nP -Fpcn` and returns
 // all TCP LISTEN sockets with their PID, port, and command name.
 func (d *darwinPlatform) FindListenTCP() []ListenEntry {

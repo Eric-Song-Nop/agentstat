@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -171,12 +172,6 @@ func probeClaudePID(pid int, pidMap map[int]string) *model.AgentSession {
 
 	status, slug, cwd := readClaudeStatus(info.JSONLPath)
 
-	// If the process is confirmed running but JSONL has no clear busy signal,
-	// treat it as idle (waiting for user input).
-	if status == model.StatusUnknown {
-		status = model.StatusIdle
-	}
-
 	title := slug
 	if title == "" {
 		title = "-"
@@ -231,6 +226,13 @@ func resolveClaudeSession(sessionID string) *claudeSessionInfo {
 
 // readClaudeStatus reads a Claude Code session JSONL and extracts the current status,
 // slug (title), and working directory.
+//
+// Deterministic rule (based on Claude Code JSONL protocol):
+//   - Each turn ends with a system/turn_duration entry
+//   - assistant entries only appear within a turn
+//   - Therefore: last turn_duration after last assistant → idle; otherwise → busy
+//
+// Performance: for files > 128KB, only the trailing 128KB is scanned.
 func readClaudeStatus(jsonlPath string) (status, slug, cwd string) {
 	f, err := os.Open(jsonlPath)
 	if err != nil {
@@ -238,64 +240,80 @@ func readClaudeStatus(jsonlPath string) (status, slug, cwd string) {
 	}
 	defer f.Close()
 
-	// Collect the last N lines for status determination and metadata extraction.
-	// We need a small window because the very last line might be a non-status type
-	// (e.g. "progress"), so we search backwards for the first meaningful status line.
-	const windowSize = 10
-	ring := make([]string, 0, windowSize)
+	// Performance optimization: seek to tail for large files.
+	const tailSize = 128 * 1024
+	fi, err := f.Stat()
+	if err != nil {
+		return model.StatusUnknown, "", ""
+	}
+	if fi.Size() > tailSize {
+		if _, err := f.Seek(fi.Size()-tailSize, io.SeekStart); err != nil {
+			return model.StatusUnknown, "", ""
+		}
+		// Discard the first (potentially truncated) line after seeking.
+		r := bufio.NewReader(f)
+		if _, err := r.ReadBytes('\n'); err != nil {
+			return model.StatusUnknown, "", ""
+		}
+		// Continue scanning from the buffered reader via a new scanner.
+		return scanClaudeJSONL(r)
+	}
 
-	scanner := bufio.NewScanner(f)
+	return scanClaudeJSONL(f)
+}
+
+// scanClaudeJSONL performs a forward scan over a reader, tracking the last line
+// positions of turn_duration and assistant entries to determine session status.
+func scanClaudeJSONL(r io.Reader) (status, slug, cwd string) {
+	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
+
+	var lastTurnDuration, lastAssistant int = -1, -1
+	lineNum := 0
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.TrimSpace(line) == "" {
+			lineNum++
 			continue
 		}
-		if len(ring) >= windowSize {
-			ring = ring[1:]
-		}
-		ring = append(ring, line)
-	}
 
-	if len(ring) == 0 {
-		return model.StatusUnknown, "", ""
-	}
-
-	// Extract slug and cwd from the last line that contains them (they appear on most entries).
-	for i := len(ring) - 1; i >= 0; i-- {
 		var entry claudeJSONLEntry
-		if json.Unmarshal([]byte(ring[i]), &entry) != nil {
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			lineNum++
 			continue
 		}
-		if slug == "" && entry.Slug != "" {
+
+		// Continuously update slug and cwd to their latest values.
+		if entry.Slug != "" {
 			slug = entry.Slug
 		}
-		if cwd == "" && entry.CWD != "" {
+		if entry.CWD != "" {
 			cwd = entry.CWD
 		}
-		if slug != "" && cwd != "" {
-			break
-		}
-	}
 
-	// Determine status by scanning backwards for the first meaningful status line.
-	for i := len(ring) - 1; i >= 0; i-- {
-		var entry claudeJSONLEntry
-		if json.Unmarshal([]byte(ring[i]), &entry) != nil {
-			continue
-		}
 		switch entry.Type {
 		case "system":
 			if entry.Subtype == "turn_duration" {
-				return model.StatusIdle, slug, cwd
+				lastTurnDuration = lineNum
 			}
-			// Other system subtypes — keep searching.
 		case "assistant":
-			return model.StatusBusy, slug, cwd
-		case "user":
-			return model.StatusBusy, slug, cwd
+			lastAssistant = lineNum
 		}
+
+		lineNum++
 	}
 
-	return model.StatusUnknown, slug, cwd
+	// Deterministic status: compare last positions of the two markers.
+	switch {
+	case lastTurnDuration > lastAssistant:
+		status = model.StatusIdle // Last turn has ended.
+	case lastAssistant > lastTurnDuration:
+		status = model.StatusBusy // Currently within a turn.
+	default:
+		// Both -1 (no turn records) → new session waiting for input.
+		status = model.StatusIdle
+	}
+
+	return status, slug, cwd
 }

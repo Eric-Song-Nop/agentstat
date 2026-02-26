@@ -32,7 +32,7 @@ Each detection method is tagged with an invasiveness label:
 | **Claude Code** | CLI | Process + debug log PID mapping → session JSONL | Last line: `system`+`turn_duration` → idle | 🟡 READ-INTERNAL | ★★★★☆ |
 | **Copilot CLI** | CLI | ACP TCP mode (`--acp --port N`) | JSON-RPC over TCP | 🔴 LAUNCH-FLAG | ★★★☆☆ |
 | **Amp Code** | CLI | Process + thread JSON state | `state.type` + `state.stopReason` in thread JSON | 🟡 READ-INTERNAL | ★★★★☆ |
-| **Gemini CLI** | CLI | Process + checkpoint files | CPU + `~/.gemini/tmp/` mtime | 🟢 PASSIVE | ★★★☆☆ |
+| **Gemini CLI** | CLI | Process + session JSON state | `messages[-1].type` in session JSON | 🟡 READ-INTERNAL | ★★★★☆ |
 | **Aider** | CLI | Process + file watch | CPU + `.aider.chat.history.md` mtime | 🟢 PASSIVE | ★★★☆☆ |
 | **Amazon Q CLI** | CLI | Process + log files + Unix socket | `$XDG_RUNTIME_DIR/qlog/*.log` activity | 🟢 PASSIVE | ★★★☆☆ |
 | **SWE-agent** | CLI (batch) | Process existence + trajectory files | Process alive = busy, exit = done | 🟢 PASSIVE | ★★★☆☆ |
@@ -604,25 +604,63 @@ CPU + network monitoring to GitHub Copilot endpoints.
 
 | Item | Detail |
 |------|--------|
-| **Process name** | `gemini` (Node.js) |
+| **Process name** | `gemini` (Node.js, argv[0] is `node`) |
 | **Config path** | `~/.gemini/settings.json` |
 | **Context file** | `~/.gemini/GEMINI.md` |
-| **Temp/checkpoints** | `~/.gemini/tmp/` |
+| **Session files** | `~/.gemini/tmp/{project}/chats/session-*.json` |
+| **Project root** | `~/.gemini/tmp/{project}/.project_root` |
 | **HTTP API** | None |
 | **Database** | None |
 
-**Status detection:**
+**Status detection (recommended approach — session JSON + CWD matching):**
 
-1. 🟢 PASSIVE — **Process + CPU:**
+1. 🟢 PASSIVE — **Process detection:**
    ```bash
-   pgrep -f gemini
-   # CPU monitoring — high = calling Gemini API
+   # Gemini runs as: node /path/to/gemini
+   # argv[0] is "node", so match any arg ending with /gemini
+   # Scan /proc/*/cmdline, match any argument with regex (^|/)gemini$
+   ```
+   > Cannot use `pgrep -x gemini` since the binary is `node`. Must check all command-line arguments.
+
+2. 🟢 PASSIVE — **CWD from `/proc`:**
+   ```bash
+   readlink /proc/{pid}/cwd
    ```
 
-2. 🟢 PASSIVE — **Checkpoint file mtime:**
+3. 🟡 READ-INTERNAL — **CWD → session file via project directory matching:**
    ```bash
-   # Monitor ~/.gemini/tmp/ for new checkpoint file mtimes
-   # Recent checkpoint = busy
+   # Session JSON files live under ~/.gemini/tmp/{project}/chats/session-*.json
+   # Each project directory contains a .project_root file with the actual project path.
+   # Match process CWD against .project_root content or directory basename.
+   # When multiple sessions match, use the one with the most recent mtime.
+   ```
+
+4. 🟡 READ-INTERNAL — **Status from last message in session JSON:**
+   ```bash
+   # Each session JSON has a messages[] array. Check the last message's type:
+   cat session-*.json | jq '.messages[-1].type'
+   ```
+
+   Gemini writes complete messages atomically, so the last message type is a **deterministic** signal — no CPU heuristic or time-based guessing needed.
+
+   | Last message `type` | → Status | Reason |
+   |---|---|---|
+   | `"user"` | **BUSY** | User submitted input, Gemini is processing |
+   | `"gemini"` | **IDLE** | Gemini finished responding, waiting for user |
+   | `"error"` | **IDLE** | Error occurred, waiting for user |
+   | `"info"` | **IDLE** | Info message, waiting for user |
+
+   **Session JSON structure:**
+   ```json
+   {
+     "sessionId": "...",
+     "startTime": "2026-02-27T10:00:00Z",
+     "lastUpdated": "2026-02-27T10:05:00Z",
+     "messages": [
+       { "type": "user", "timestamp": "..." },
+       { "type": "gemini", "timestamp": "..." }
+     ]
+   }
    ```
 
 ---
@@ -879,6 +917,7 @@ Agents with queryable local databases. **No startup changes needed, but reads un
 | Windsurf | `~/.config/Windsurf/.../state.vscdb` | extension state keys | **High** (undocumented) |
 | Zed | `~/.local/share/zed/db/0-stable/db.sqlite` | workspace state | Medium |
 | Amp Code | `~/.local/share/amp/threads/*.json` | `state.type` + `state.stopReason` in last assistant msg | **Medium** (thread JSON format stable) |
+| Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json` | `messages[-1].type` — deterministic signal | **Medium** (session JSON format stable) |
 | Cline/Roo (VSCode) | `~/.config/Code/.../state.vscdb` | extension state keys | **High** (undocumented) |
 
 ### Tier 3: File System Monitoring (Acceptable) — 🟢 PASSIVE
@@ -888,7 +927,6 @@ Watch file modification times to infer activity. **Fully passive — only `stat(
 | Agent | Files to Watch |
 |-------|---------------|
 | Aider | `$CWD/.aider.chat.history.md` |
-| Gemini CLI | `~/.gemini/tmp/` |
 | Amazon Q | `$XDG_RUNTIME_DIR/qlog/*.log` |
 | SWE-agent | `trajectories/**/*.traj` |
 

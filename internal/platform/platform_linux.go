@@ -114,6 +114,31 @@ func (l *linuxPlatform) ReadProcessCwd(pid int) string {
 	return link
 }
 
+// ReadProcessPPID returns the parent PID by reading field 4 from /proc/{pid}/stat.
+func (l *linuxPlatform) ReadProcessPPID(pid int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	// /proc/PID/stat format: "pid (comm) state ppid ..."
+	// The comm field may contain spaces and parentheses, so find the last ')'.
+	s := string(data)
+	idx := strings.LastIndex(s, ")")
+	if idx < 0 || idx+2 >= len(s) {
+		return 0
+	}
+	// After ") " we have: state ppid ...
+	fields := strings.Fields(s[idx+2:])
+	if len(fields) < 2 {
+		return 0
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0
+	}
+	return ppid
+}
+
 // FindListenTCP parses `ss -tlnp` output and returns all TCP LISTEN sockets.
 func (l *linuxPlatform) FindListenTCP() []ListenEntry {
 	out, err := exec.Command("ss", "-tlnp").Output()

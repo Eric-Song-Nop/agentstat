@@ -10,7 +10,7 @@ const (
 
 // AgentSession represents a single discovered agent session.
 type AgentSession struct {
-	Agent     string `json:"agent"`      // "opencode" | "codex" | "claude" | "amp"
+	Agent     string `json:"agent"`      // "opencode" | "codex" | "claude" | "amp" | "gemini"
 	Status    string `json:"status"`     // "busy" | "idle" | "retry" | "unknown"
 	SessionID string `json:"session_id"`
 	Title     string `json:"title"`
@@ -19,4 +19,4 @@ type AgentSession struct {
 }
 
 // AllAgents lists the known agent names for validation.
-var AllAgents = []string{"opencode", "codex", "claude", "amp"}
+var AllAgents = []string{"opencode", "codex", "claude", "amp", "gemini"}

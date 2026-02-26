@@ -20,6 +20,8 @@ type Platform interface {
 	ListOpenFiles(pid int) []string
 	// ReadProcessCwd returns the current working directory of a process.
 	ReadProcessCwd(pid int) string
+	// ReadProcessPPID returns the parent PID of a process, or 0 on failure.
+	ReadProcessPPID(pid int) int
 	// FindListenTCP returns all TCP LISTEN sockets on the host.
 	FindListenTCP() []ListenEntry
 }
