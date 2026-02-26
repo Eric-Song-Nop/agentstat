@@ -6,9 +6,9 @@ Detect and report the status of running AI coding agents on your machine.
 
 | Agent | Detection Method |
 |-------|-----------------|
-| [OpenCode](https://github.com/opencode-ai/opencode) | HTTP API via listening port (`ss -tlnp`) |
-| [Codex](https://github.com/openai/codex) | `/proc` fd scan → rollout JSONL + SQLite DB |
-| [Claude Code](https://github.com/anthropics/claude-code) | `/proc` fd scan → session lock + JSONL |
+| [OpenCode](https://github.com/opencode-ai/opencode) | HTTP API via listening port (Linux: `ss -tlnp`, macOS: `lsof`) |
+| [Codex](https://github.com/openai/codex) | Open file scan → rollout JSONL + SQLite DB (Linux: `/proc`, macOS: `lsof`) |
+| [Claude Code](https://github.com/anthropics/claude-code) | Open file scan → session lock + JSONL (Linux: `/proc`, macOS: `lsof`) |
 
 ## Installation
 
@@ -83,19 +83,19 @@ opencode idle                                                                   
 
 ### OpenCode
 
-OpenCode runs a built-in HTTP server. `agentstat` uses `ss -tlnp` to find listening ports owned by an `opencode` process, then queries `/session/status` and `/session` endpoints to determine busy/idle state and session metadata.
+OpenCode runs a built-in HTTP server. `agentstat` finds listening ports owned by an `opencode` process (Linux: `ss -tlnp`, macOS: `lsof -iTCP`), then queries `/session/status` and `/session` endpoints to determine busy/idle state and session metadata.
 
 ### Codex
 
-Codex writes rollout JSONL files during active sessions. `agentstat` scans `/proc/{pid}/fd` for symlinks pointing to rollout files, reads the last JSONL entry to determine status (`task_complete` → idle, otherwise busy), and enriches metadata (title, cwd) from the Codex SQLite database (`~/.codex/state_5.sqlite`).
+Codex writes rollout JSONL files during active sessions. `agentstat` scans open file descriptors (Linux: `/proc/{pid}/fd`, macOS: `lsof -p`) for rollout files, reads the last JSONL entry to determine status (`task_complete` → idle, otherwise busy), and enriches metadata (title, cwd) from the Codex SQLite database (`~/.codex/state_5.sqlite`).
 
 ### Claude Code
 
-Claude Code holds a `.lock` file under `~/.claude/tasks/{session-id}/` while running. `agentstat` scans `/proc/{pid}/fd` for these lock symlinks, resolves the corresponding session JSONL under `~/.claude/projects/`, and reads the trailing entries to determine status (`turn_duration` → idle, `assistant`/`user` → busy).
+Claude Code holds a `.lock` file under `~/.claude/tasks/{session-id}/` while running. `agentstat` scans open file descriptors (Linux: `/proc/{pid}/fd`, macOS: `lsof -p`) for these lock files, resolves the corresponding session JSONL under `~/.claude/projects/`, and reads the trailing entries to determine status (`turn_duration` → idle, `assistant`/`user` → busy).
 
 ## Platform
 
-Linux only — relies on `/proc` filesystem and `ss` command.
+Linux and macOS. Platform-specific operations (`/proc` on Linux, `lsof`/`ps` on macOS) are abstracted behind a unified interface using Go build tags. No external dependencies beyond standard system tools.
 
 ## License
 

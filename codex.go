@@ -4,11 +4,9 @@ import (
 	"bufio"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -57,41 +55,14 @@ func discoverCodex() []AgentSession {
 	return results
 }
 
-// findCodexPIDs scans /proc/*/cmdline to find PIDs where cmdline ends with "codex/codex".
+// findCodexPIDs returns PIDs of processes whose binary path ends with "codex/codex".
 func findCodexPIDs() []int {
-	entries, err := filepath.Glob("/proc/[0-9]*/cmdline")
-	if err != nil {
-		return nil
-	}
-
 	re := regexp.MustCompile(`codex/codex$`)
-	var pids []int
-
-	for _, entry := range entries {
-		data, err := os.ReadFile(entry)
-		if err != nil {
-			continue
-		}
-		// cmdline is null-delimited; take the first arg (the binary path)
-		args := strings.Split(string(data), "\x00")
-		if len(args) == 0 {
-			continue
-		}
-		if re.MatchString(args[0]) {
-			parts := strings.Split(entry, "/")
-			if len(parts) >= 3 {
-				pid, err := strconv.Atoi(parts[2])
-				if err == nil {
-					pids = append(pids, pid)
-				}
-			}
-		}
-	}
-	return pids
+	return findPIDsByName(re)
 }
 
 // probeCodexPID examines a single Codex process and returns its session info.
-// Strategy: find open rollout file via /proc/fd, then enrich with DB metadata.
+// Strategy: find open rollout file via platform API, then enrich with DB metadata.
 func probeCodexPID(pid int) *AgentSession {
 	rolloutPath, threadID := findRolloutFile(pid)
 	if rolloutPath == "" {
@@ -99,7 +70,7 @@ func probeCodexPID(pid int) *AgentSession {
 	}
 
 	status := readRolloutStatus(rolloutPath)
-	cwd := readProcCwd(pid)
+	cwd := readProcessCwd(pid)
 	title := "-"
 
 	// Enrich from DB — title and cwd (DB cwd is the original launch dir).
@@ -120,27 +91,19 @@ func probeCodexPID(pid int) *AgentSession {
 	}
 }
 
-// findRolloutFile scans /proc/{pid}/fd/* for a symlink pointing to a rollout JSONL file.
+// findRolloutFile inspects open files of a process for a rollout JSONL file.
 // Returns the file path and extracted thread ID (UUID).
 func findRolloutFile(pid int) (path string, threadID string) {
-	fdDir := fmt.Sprintf("/proc/%d/fd", pid)
-	entries, err := os.ReadDir(fdDir)
-	if err != nil {
-		return "", ""
-	}
+	files := listOpenFiles(pid)
 
 	// Filename: rollout-2026-02-26T23-51-07-019c9aa5-8f55-7833-b235-d00a5faa09d0.jsonl
 	// Extract the trailing UUID (8-4-4-4-12 hex).
 	re := regexp.MustCompile(`rollout.*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
 
-	for _, entry := range entries {
-		link, err := os.Readlink(filepath.Join(fdDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		matches := re.FindStringSubmatch(link)
+	for _, f := range files {
+		matches := re.FindStringSubmatch(f)
 		if len(matches) >= 2 {
-			return link, matches[1]
+			return f, matches[1]
 		}
 	}
 	return "", ""
@@ -177,15 +140,6 @@ func readRolloutStatus(path string) string {
 		return "idle"
 	}
 	return "busy"
-}
-
-// readProcCwd reads the current working directory of a process from /proc.
-func readProcCwd(pid int) string {
-	link, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
-	if err != nil {
-		return "-"
-	}
-	return link
 }
 
 // lookupCodexThread queries the Codex SQLite database for thread metadata.

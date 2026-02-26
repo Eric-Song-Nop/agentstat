@@ -4,9 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -64,34 +61,17 @@ func discoverOpenCode() []AgentSession {
 	return results
 }
 
-// findOpenCodeInstances parses `ss -tlnp` to find all opencode listening ports and PIDs.
+// findOpenCodeInstances uses findListenTCP to discover all opencode listening ports.
 // Deduplicates by PID (a single process may listen on multiple ports).
 func findOpenCodeInstances() []openCodeInstance {
-	out, err := exec.Command("ss", "-tlnp").Output()
-	if err != nil {
-		return nil
-	}
-
-	// Match lines containing "opencode" — extract port and PID
-	// Example: LISTEN  0  4096  0.0.0.0:38129  0.0.0.0:*  users:(("opencode",pid=1059916,fd=30))
-	re := regexp.MustCompile(`:(\d+)\s+\S+\s+users:\(\("opencode",pid=(\d+),`)
+	entries := findListenTCP()
 
 	seen := make(map[int]bool)
 	var instances []openCodeInstance
-
-	for _, line := range strings.Split(string(out), "\n") {
-		if !strings.Contains(line, "opencode") {
-			continue
-		}
-		matches := re.FindStringSubmatch(line)
-		if len(matches) < 3 {
-			continue
-		}
-		port, _ := strconv.Atoi(matches[1])
-		pid, _ := strconv.Atoi(matches[2])
-		if port > 0 && pid > 0 && !seen[pid] {
-			seen[pid] = true
-			instances = append(instances, openCodeInstance{Port: port, PID: pid})
+	for _, e := range entries {
+		if strings.EqualFold(e.Cmd, "opencode") && !seen[e.PID] {
+			seen[e.PID] = true
+			instances = append(instances, openCodeInstance{Port: e.Port, PID: e.PID})
 		}
 	}
 	return instances

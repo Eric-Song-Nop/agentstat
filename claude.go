@@ -3,11 +3,9 @@ package main
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -58,37 +56,10 @@ func discoverClaude() []AgentSession {
 	return results
 }
 
-// findClaudePIDs scans /proc/*/cmdline to find PIDs where the binary is "claude".
+// findClaudePIDs returns PIDs of processes whose binary is "claude".
 func findClaudePIDs() []int {
-	entries, err := filepath.Glob("/proc/[0-9]*/cmdline")
-	if err != nil {
-		return nil
-	}
-
 	re := regexp.MustCompile(`(^|/)claude$`)
-	var pids []int
-
-	for _, entry := range entries {
-		data, err := os.ReadFile(entry)
-		if err != nil {
-			continue
-		}
-		// cmdline is null-delimited; take the first arg (the binary path)
-		args := strings.Split(string(data), "\x00")
-		if len(args) == 0 {
-			continue
-		}
-		if re.MatchString(args[0]) {
-			parts := strings.Split(entry, "/")
-			if len(parts) >= 3 {
-				pid, err := strconv.Atoi(parts[2])
-				if err == nil {
-					pids = append(pids, pid)
-				}
-			}
-		}
-	}
-	return pids
+	return findPIDsByName(re)
 }
 
 // probeClaudePID examines a single Claude Code process and returns its session info.
@@ -112,7 +83,7 @@ func probeClaudePID(pid int) *AgentSession {
 
 	dir := cwd
 	if dir == "" {
-		dir = readProcCwd(pid)
+		dir = readProcessCwd(pid)
 	}
 
 	return &AgentSession{
@@ -125,25 +96,17 @@ func probeClaudePID(pid int) *AgentSession {
 	}
 }
 
-// findClaudeSessionLocks scans /proc/{pid}/fd/* for symlinks to .claude/tasks/{uuid}/.lock
+// findClaudeSessionLocks inspects open files of a process for .claude/tasks/{uuid}/.lock
 // and returns deduplicated session UUIDs.
 func findClaudeSessionLocks(pid int) []string {
-	fdDir := fmt.Sprintf("/proc/%d/fd", pid)
-	entries, err := os.ReadDir(fdDir)
-	if err != nil {
-		return nil
-	}
+	files := listOpenFiles(pid)
 
 	re := regexp.MustCompile(`/\.claude/tasks/([0-9a-f-]{36})/\.lock$`)
 	seen := make(map[string]bool)
 	var ids []string
 
-	for _, entry := range entries {
-		link, err := os.Readlink(filepath.Join(fdDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		matches := re.FindStringSubmatch(link)
+	for _, f := range files {
+		matches := re.FindStringSubmatch(f)
 		if len(matches) >= 2 && !seen[matches[1]] {
 			seen[matches[1]] = true
 			ids = append(ids, matches[1])
