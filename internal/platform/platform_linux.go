@@ -50,6 +50,40 @@ func (l *linuxPlatform) FindPIDsByName(re *regexp.Regexp) []int {
 	return pids
 }
 
+// FindPIDsByArgs scans /proc/*/cmdline and returns PIDs where any argument matches re.
+func (l *linuxPlatform) FindPIDsByArgs(re *regexp.Regexp) []int {
+	entries, err := filepath.Glob("/proc/[0-9]*/cmdline")
+	if err != nil {
+		return nil
+	}
+
+	var pids []int
+	for _, entry := range entries {
+		data, err := os.ReadFile(entry)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		args := strings.Split(string(data), "\x00")
+		matched := false
+		for _, arg := range args {
+			if arg != "" && re.MatchString(arg) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			parts := strings.Split(entry, "/")
+			if len(parts) >= 3 {
+				pid, err := strconv.Atoi(parts[2])
+				if err == nil {
+					pids = append(pids, pid)
+				}
+			}
+		}
+	}
+	return pids
+}
+
 // ListOpenFiles returns absolute file paths of all open FDs for a process
 // by reading /proc/{pid}/fd/* symlinks.
 func (l *linuxPlatform) ListOpenFiles(pid int) []string {

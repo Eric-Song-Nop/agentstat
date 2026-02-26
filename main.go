@@ -51,7 +51,7 @@ func agentEnabled(selected map[string]bool, name string) bool {
 
 func main() {
 	jsonFlag := flag.Bool("json", false, "output in JSON format")
-	agentsFlag := flag.String("agents", "", "comma-separated list of agents to discover (opencode,codex,claude); default: all")
+	agentsFlag := flag.String("agents", "", "comma-separated list of agents to discover (opencode,codex,claude,amp); default: all")
 	flag.Parse()
 
 	agents := parseAgents(*agentsFlag)
@@ -66,6 +66,9 @@ func main() {
 	}
 	if agentEnabled(agents, "claude") {
 		sessions = append(sessions, agent.DiscoverClaude()...)
+	}
+	if agentEnabled(agents, "amp") {
+		sessions = append(sessions, agent.DiscoverAmp()...)
 	}
 
 	if len(sessions) == 0 {

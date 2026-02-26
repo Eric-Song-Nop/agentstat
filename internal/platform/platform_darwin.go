@@ -49,6 +49,40 @@ func (d *darwinPlatform) FindPIDsByName(re *regexp.Regexp) []int {
 	return pids
 }
 
+// FindPIDsByArgs runs `ps ax -o pid,command` and returns PIDs where any
+// command-line argument matches re.
+func (d *darwinPlatform) FindPIDsByArgs(re *regexp.Regexp) []int {
+	out, err := exec.Command("ps", "ax", "-o", "pid,command").Output()
+	if err != nil {
+		return nil
+	}
+
+	var pids []int
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.SplitN(line, " ", 2)
+		if len(fields) < 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(fields[0]))
+		if err != nil {
+			continue
+		}
+		cmd := strings.TrimSpace(fields[1])
+		// Check each argument individually.
+		for _, arg := range strings.Fields(cmd) {
+			if re.MatchString(arg) {
+				pids = append(pids, pid)
+				break
+			}
+		}
+	}
+	return pids
+}
+
 // ListOpenFiles runs `lsof -p PID -Fn` and returns absolute file paths
 // of all open file descriptors for the given process.
 func (d *darwinPlatform) ListOpenFiles(pid int) []string {

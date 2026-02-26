@@ -31,7 +31,7 @@ Each detection method is tagged with an invasiveness label:
 | **Cline CLI** | CLI | `--json` output + file watch | `ask` msg = idle, `say` msg = busy | 🔴 LAUNCH-FLAG / 🟡 READ-INTERNAL | ★★★☆☆ |
 | **Claude Code** | CLI | Process + debug log PID mapping → session JSONL | Last line: `system`+`turn_duration` → idle | 🟡 READ-INTERNAL | ★★★★☆ |
 | **Copilot CLI** | CLI | ACP TCP mode (`--acp --port N`) | JSON-RPC over TCP | 🔴 LAUNCH-FLAG | ★★★☆☆ |
-| **Amp Code** | CLI | Process + file changes directory | `~/.amp/file-changes/` transaction mtime | 🟢 PASSIVE | ★★★☆☆ |
+| **Amp Code** | CLI | Process + thread JSON state | `state.type` + `state.stopReason` in thread JSON | 🟡 READ-INTERNAL | ★★★★☆ |
 | **Gemini CLI** | CLI | Process + checkpoint files | CPU + `~/.gemini/tmp/` mtime | 🟢 PASSIVE | ★★★☆☆ |
 | **Aider** | CLI | Process + file watch | CPU + `.aider.chat.history.md` mtime | 🟢 PASSIVE | ★★★☆☆ |
 | **Amazon Q CLI** | CLI | Process + log files + Unix socket | `$XDG_RUNTIME_DIR/qlog/*.log` activity | 🟢 PASSIVE | ★★★☆☆ |
@@ -242,26 +242,53 @@ SELECT id, title, directory FROM session ORDER BY updated DESC;
 
 | Item | Detail |
 |------|--------|
-| **Process name** | `amp` |
+| **Process name** | `node` (argv contains `amp`) |
 | **Config path** | `~/.config/amp/settings.json` |
-| **State path** | `~/.amp/` |
+| **State path** | `~/.local/share/amp/` |
+| **Thread files** | `~/.local/share/amp/threads/*.json` (one per session) |
+| **Session file** | `~/.local/share/amp/session.json` (contains `lastThreadId`) |
 | **File changes** | `~/.amp/file-changes/T-{ULID}/` (transaction dirs) |
 | **HTTP API** | None |
 | **Database** | None |
 
-**Status detection:**
+**Status detection (recommended approach — thread JSON + CWD matching):**
 
-1. 🟢 PASSIVE — **Process detection + CPU:**
+1. 🟢 PASSIVE — **Process detection:**
    ```bash
-   pgrep -f amp
+   # Amp runs as: node --no-warnings ~/.local/share/pnpm/amp
+   # argv[0] is "node", so match any arg ending with /amp
+   # Scan /proc/*/cmdline, match any argument with regex (^|/)amp$
+   ```
+   > Cannot use `pgrep -x amp` since the binary is `node`. Must check all command-line arguments.
+
+2. 🟢 PASSIVE — **CWD from `/proc`:**
+   ```bash
+   readlink /proc/{pid}/cwd
    ```
 
-2. 🟢 PASSIVE — **File change transaction mtime:**
+3. 🟡 READ-INTERNAL — **CWD → thread file via `env.initial.trees[].uri`:**
    ```bash
-   # Check most recent transaction directory in ~/.amp/file-changes/
-   # Recent modification = busy
-   # ULID in directory name encodes timestamp — only stat(), no content read
+   # Each thread JSON contains workspace info:
+   # { "env": { "initial": { "trees": [{ "uri": "file:///path/to/project", ... }] } } }
+   # Convert file:// URI to path and match against process CWD.
+   # When multiple threads match the same CWD, use the one with the most recent mtime.
    ```
+
+4. 🟡 READ-INTERNAL — **Status from last assistant message's `state`:**
+   ```bash
+   # Each thread JSON has a messages array. Find the last assistant message:
+   # { "role": "assistant", "state": {"type": "complete", "stopReason": "end_turn"}, ... }
+   ```
+
+   | `state.type` | `state.stopReason` | → Status |
+   |---|---|---|
+   | `"streaming"` | — | **BUSY** (generating response) |
+   | `"complete"` | `"tool_use"` | **BUSY** (about to execute tool) |
+   | `"complete"` | `"end_turn"` | **IDLE** (waiting for user input) |
+   | `"cancelled"` | — | IDLE |
+   | `"error"` | — | IDLE |
+
+   > This is **precise** — no CPU heuristic needed. The `state` field directly encodes the agent's execution phase.
 
 ---
 
@@ -851,6 +878,7 @@ Agents with queryable local databases. **No startup changes needed, but reads un
 | Cursor | `~/.config/Cursor/.../state.vscdb` | `composer.composerData` key | **High** (undocumented key) |
 | Windsurf | `~/.config/Windsurf/.../state.vscdb` | extension state keys | **High** (undocumented) |
 | Zed | `~/.local/share/zed/db/0-stable/db.sqlite` | workspace state | Medium |
+| Amp Code | `~/.local/share/amp/threads/*.json` | `state.type` + `state.stopReason` in last assistant msg | **Medium** (thread JSON format stable) |
 | Cline/Roo (VSCode) | `~/.config/Code/.../state.vscdb` | extension state keys | **High** (undocumented) |
 
 ### Tier 3: File System Monitoring (Acceptable) — 🟢 PASSIVE
@@ -859,7 +887,6 @@ Watch file modification times to infer activity. **Fully passive — only `stat(
 
 | Agent | Files to Watch |
 |-------|---------------|
-| Amp Code | `~/.amp/file-changes/T-*/` |
 | Aider | `$CWD/.aider.chat.history.md` |
 | Gemini CLI | `~/.gemini/tmp/` |
 | Amazon Q | `$XDG_RUNTIME_DIR/qlog/*.log` |

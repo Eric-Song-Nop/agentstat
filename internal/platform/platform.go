@@ -13,6 +13,9 @@ type ListenEntry struct {
 type Platform interface {
 	// FindPIDsByName returns PIDs whose binary path (argv[0]) matches re.
 	FindPIDsByName(re *regexp.Regexp) []int
+	// FindPIDsByArgs returns PIDs where any command-line argument matches re.
+	// Unlike FindPIDsByName which only checks argv[0], this checks all args.
+	FindPIDsByArgs(re *regexp.Regexp) []int
 	// ListOpenFiles returns absolute file paths of all open FDs for a process.
 	ListOpenFiles(pid int) []string
 	// ReadProcessCwd returns the current working directory of a process.
