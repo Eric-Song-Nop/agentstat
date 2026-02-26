@@ -1,4 +1,4 @@
-module agentstat
+module github.com/Eric-Song-Nop/agentstat
 
 go 1.25.0
 

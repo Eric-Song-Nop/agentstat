@@ -13,7 +13,7 @@ Detect and report the status of running AI coding agents on your machine.
 ## Installation
 
 ```bash
-go install agentstat@latest
+go install github.com/Eric-Song-Nop/agentstat@latest
 ```
 
 Or build from source:
