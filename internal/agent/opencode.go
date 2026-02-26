@@ -1,12 +1,14 @@
-package main
+package agent
 
 import (
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/Eric-Song-Nop/agentstat/internal/model"
+	"github.com/Eric-Song-Nop/agentstat/internal/platform"
 )
 
 // openCodeInstance represents a discovered OpenCode TUI instance.
@@ -32,39 +34,20 @@ type sessionListEntry struct {
 
 var httpClient = &http.Client{Timeout: 500 * time.Millisecond}
 
-// discoverOpenCode finds all running OpenCode instances.
+// DiscoverOpenCode finds all running OpenCode instances.
 // Each process = one AgentSession. Status is "busy"/"retry" if any session is active, otherwise "idle".
-func discoverOpenCode() []AgentSession {
+func DiscoverOpenCode() []model.AgentSession {
 	instances := findOpenCodeInstances()
 	if len(instances) == 0 {
 		return nil
 	}
-
-	var mu sync.Mutex
-	var results []AgentSession
-	var wg sync.WaitGroup
-
-	for _, inst := range instances {
-		wg.Add(1)
-		go func(inst openCodeInstance) {
-			defer wg.Done()
-			session := queryOpenCodeInstance(inst)
-			if session != nil {
-				mu.Lock()
-				results = append(results, *session)
-				mu.Unlock()
-			}
-		}(inst)
-	}
-
-	wg.Wait()
-	return results
+	return ConcurrentProbe(instances, queryOpenCodeInstance)
 }
 
-// findOpenCodeInstances uses findListenTCP to discover all opencode listening ports.
+// findOpenCodeInstances uses FindListenTCP to discover all opencode listening ports.
 // Deduplicates by PID (a single process may listen on multiple ports).
 func findOpenCodeInstances() []openCodeInstance {
-	entries := findListenTCP()
+	entries := platform.P.FindListenTCP()
 
 	seen := make(map[int]bool)
 	var instances []openCodeInstance
@@ -80,14 +63,14 @@ func findOpenCodeInstances() []openCodeInstance {
 // queryOpenCodeInstance queries a single OpenCode process and returns one AgentSession.
 // Only populates session metadata (ID, title, directory) when busy.
 // When idle, those fields are left empty — we can't reliably determine which session the TUI is viewing.
-func queryOpenCodeInstance(inst openCodeInstance) *AgentSession {
+func queryOpenCodeInstance(inst openCodeInstance) *model.AgentSession {
 	base := fmt.Sprintf("http://localhost:%d", inst.Port)
 
 	statusMap := fetchSessionStatus(base)
 
 	// If any session is busy/retry, report that session's metadata.
 	for id, entry := range statusMap {
-		result := &AgentSession{
+		result := &model.AgentSession{
 			Agent:     "opencode",
 			Status:    entry.Type,
 			SessionID: id,
@@ -107,9 +90,9 @@ func queryOpenCodeInstance(inst openCodeInstance) *AgentSession {
 	}
 
 	// No busy session — report idle with no session metadata.
-	return &AgentSession{
+	return &model.AgentSession{
 		Agent:  "opencode",
-		Status: "idle",
+		Status: model.StatusIdle,
 		PID:    inst.PID,
 	}
 }

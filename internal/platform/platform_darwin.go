@@ -1,6 +1,6 @@
 //go:build darwin
 
-package main
+package platform
 
 import (
 	"os/exec"
@@ -9,8 +9,15 @@ import (
 	"strings"
 )
 
-// findPIDsByName runs `ps ax -o pid,command` and returns PIDs whose command matches re.
-func findPIDsByName(re *regexp.Regexp) []int {
+// Compile-time interface check.
+var _ Platform = (*darwinPlatform)(nil)
+
+type darwinPlatform struct{}
+
+func init() { P = &darwinPlatform{} }
+
+// FindPIDsByName runs `ps ax -o pid,command` and returns PIDs whose command matches re.
+func (d *darwinPlatform) FindPIDsByName(re *regexp.Regexp) []int {
 	out, err := exec.Command("ps", "ax", "-o", "pid,command").Output()
 	if err != nil {
 		return nil
@@ -42,9 +49,9 @@ func findPIDsByName(re *regexp.Regexp) []int {
 	return pids
 }
 
-// listOpenFiles runs `lsof -p PID -Fn` and returns absolute file paths
+// ListOpenFiles runs `lsof -p PID -Fn` and returns absolute file paths
 // of all open file descriptors for the given process.
-func listOpenFiles(pid int) []string {
+func (d *darwinPlatform) ListOpenFiles(pid int) []string {
 	out, err := exec.Command("lsof", "-p", strconv.Itoa(pid), "-Fn").Output()
 	if err != nil {
 		return nil
@@ -61,9 +68,9 @@ func listOpenFiles(pid int) []string {
 	return paths
 }
 
-// readProcessCwd runs `lsof -a -p PID -d cwd -Fn` and returns the
+// ReadProcessCwd runs `lsof -a -p PID -d cwd -Fn` and returns the
 // current working directory of the given process.
-func readProcessCwd(pid int) string {
+func (d *darwinPlatform) ReadProcessCwd(pid int) string {
 	out, err := exec.Command("lsof", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
 	if err != nil {
 		return "-"
@@ -77,16 +84,9 @@ func readProcessCwd(pid int) string {
 	return "-"
 }
 
-// listenEntry represents a TCP listening socket.
-type listenEntry struct {
-	Port int
-	PID  int
-	Cmd  string
-}
-
-// findListenTCP runs `lsof -iTCP -sTCP:LISTEN -nP -Fpcn` and returns
+// FindListenTCP runs `lsof -iTCP -sTCP:LISTEN -nP -Fpcn` and returns
 // all TCP LISTEN sockets with their PID, port, and command name.
-func findListenTCP() []listenEntry {
+func (d *darwinPlatform) FindListenTCP() []ListenEntry {
 	out, err := exec.Command("lsof", "-iTCP", "-sTCP:LISTEN", "-nP", "-Fpcn").Output()
 	if err != nil {
 		return nil
@@ -97,7 +97,7 @@ func findListenTCP() []listenEntry {
 	//   c<command>    — command name
 	//   n<name>       — network name (e.g. "*:8080" or "127.0.0.1:3000")
 	// A single PID may have multiple "n" lines (multiple listening ports).
-	var entries []listenEntry
+	var entries []ListenEntry
 	var curPID int
 	var curCmd string
 
@@ -125,7 +125,7 @@ func findListenTCP() []listenEntry {
 				continue
 			}
 			if curPID > 0 {
-				entries = append(entries, listenEntry{Port: port, PID: curPID, Cmd: curCmd})
+				entries = append(entries, ListenEntry{Port: port, PID: curPID, Cmd: curCmd})
 			}
 		}
 	}

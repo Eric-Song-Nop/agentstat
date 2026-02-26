@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"bufio"
@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/Eric-Song-Nop/agentstat/internal/model"
+	"github.com/Eric-Song-Nop/agentstat/internal/platform"
 )
 
 // claudeSessionInfo holds metadata extracted from a Claude Code session JSONL.
@@ -28,42 +30,23 @@ type claudeJSONLEntry struct {
 	CWD     string `json:"cwd"`
 }
 
-// discoverClaude finds all running Claude Code processes and determines their status.
-func discoverClaude() []AgentSession {
+// DiscoverClaude finds all running Claude Code processes and determines their status.
+func DiscoverClaude() []model.AgentSession {
 	pids := findClaudePIDs()
 	if len(pids) == 0 {
 		return nil
 	}
-
-	var mu sync.Mutex
-	var results []AgentSession
-	var wg sync.WaitGroup
-
-	for _, pid := range pids {
-		wg.Add(1)
-		go func(pid int) {
-			defer wg.Done()
-			session := probeClaudePID(pid)
-			if session != nil {
-				mu.Lock()
-				results = append(results, *session)
-				mu.Unlock()
-			}
-		}(pid)
-	}
-
-	wg.Wait()
-	return results
+	return ConcurrentProbe(pids, probeClaudePID)
 }
 
 // findClaudePIDs returns PIDs of processes whose binary is "claude".
 func findClaudePIDs() []int {
 	re := regexp.MustCompile(`(^|/)claude$`)
-	return findPIDsByName(re)
+	return platform.P.FindPIDsByName(re)
 }
 
 // probeClaudePID examines a single Claude Code process and returns its session info.
-func probeClaudePID(pid int) *AgentSession {
+func probeClaudePID(pid int) *model.AgentSession {
 	sessionIDs := findClaudeSessionLocks(pid)
 	if len(sessionIDs) == 0 {
 		return nil
@@ -83,10 +66,10 @@ func probeClaudePID(pid int) *AgentSession {
 
 	dir := cwd
 	if dir == "" {
-		dir = readProcessCwd(pid)
+		dir = platform.P.ReadProcessCwd(pid)
 	}
 
-	return &AgentSession{
+	return &model.AgentSession{
 		Agent:     "claude",
 		Status:    status,
 		SessionID: info.SessionID,
@@ -99,7 +82,7 @@ func probeClaudePID(pid int) *AgentSession {
 // findClaudeSessionLocks inspects open files of a process for .claude/tasks/{uuid}/.lock
 // and returns deduplicated session UUIDs.
 func findClaudeSessionLocks(pid int) []string {
-	files := listOpenFiles(pid)
+	files := platform.P.ListOpenFiles(pid)
 
 	re := regexp.MustCompile(`/\.claude/tasks/([0-9a-f-]{36})/\.lock$`)
 	seen := make(map[string]bool)
@@ -155,7 +138,7 @@ func resolveClaudeSession(sessionIDs []string) *claudeSessionInfo {
 func readClaudeStatus(jsonlPath string) (status, slug, cwd string) {
 	f, err := os.Open(jsonlPath)
 	if err != nil {
-		return "unknown", "", ""
+		return model.StatusUnknown, "", ""
 	}
 	defer f.Close()
 
@@ -179,7 +162,7 @@ func readClaudeStatus(jsonlPath string) (status, slug, cwd string) {
 	}
 
 	if len(ring) == 0 {
-		return "unknown", "", ""
+		return model.StatusUnknown, "", ""
 	}
 
 	// Extract slug and cwd from the last line that contains them (they appear on most entries).
@@ -208,15 +191,15 @@ func readClaudeStatus(jsonlPath string) (status, slug, cwd string) {
 		switch entry.Type {
 		case "system":
 			if entry.Subtype == "turn_duration" {
-				return "idle", slug, cwd
+				return model.StatusIdle, slug, cwd
 			}
 			// Other system subtypes — keep searching.
 		case "assistant":
-			return "busy", slug, cwd
+			return model.StatusBusy, slug, cwd
 		case "user":
-			return "busy", slug, cwd
+			return model.StatusBusy, slug, cwd
 		}
 	}
 
-	return "unknown", slug, cwd
+	return model.StatusUnknown, slug, cwd
 }

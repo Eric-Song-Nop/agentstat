@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"bufio"
@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
+
+	"github.com/Eric-Song-Nop/agentstat/internal/model"
+	"github.com/Eric-Song-Nop/agentstat/internal/platform"
 
 	_ "modernc.org/sqlite"
 )
@@ -27,50 +29,31 @@ type codexThreadInfo struct {
 	CWD         string
 }
 
-// discoverCodex finds all running Codex processes and determines their status.
-func discoverCodex() []AgentSession {
+// DiscoverCodex finds all running Codex processes and determines their status.
+func DiscoverCodex() []model.AgentSession {
 	pids := findCodexPIDs()
 	if len(pids) == 0 {
 		return nil
 	}
-
-	var mu sync.Mutex
-	var results []AgentSession
-	var wg sync.WaitGroup
-
-	for _, pid := range pids {
-		wg.Add(1)
-		go func(pid int) {
-			defer wg.Done()
-			session := probeCodexPID(pid)
-			if session != nil {
-				mu.Lock()
-				results = append(results, *session)
-				mu.Unlock()
-			}
-		}(pid)
-	}
-
-	wg.Wait()
-	return results
+	return ConcurrentProbe(pids, probeCodexPID)
 }
 
 // findCodexPIDs returns PIDs of processes whose binary path ends with "codex/codex".
 func findCodexPIDs() []int {
 	re := regexp.MustCompile(`codex/codex$`)
-	return findPIDsByName(re)
+	return platform.P.FindPIDsByName(re)
 }
 
 // probeCodexPID examines a single Codex process and returns its session info.
 // Strategy: find open rollout file via platform API, then enrich with DB metadata.
-func probeCodexPID(pid int) *AgentSession {
+func probeCodexPID(pid int) *model.AgentSession {
 	rolloutPath, threadID := findRolloutFile(pid)
 	if rolloutPath == "" {
 		return nil
 	}
 
 	status := readRolloutStatus(rolloutPath)
-	cwd := readProcessCwd(pid)
+	cwd := platform.P.ReadProcessCwd(pid)
 	title := "-"
 
 	// Enrich from DB — title and cwd (DB cwd is the original launch dir).
@@ -81,7 +64,7 @@ func probeCodexPID(pid int) *AgentSession {
 		}
 	}
 
-	return &AgentSession{
+	return &model.AgentSession{
 		Agent:     "codex",
 		Status:    status,
 		SessionID: threadID,
@@ -94,7 +77,7 @@ func probeCodexPID(pid int) *AgentSession {
 // findRolloutFile inspects open files of a process for a rollout JSONL file.
 // Returns the file path and extracted thread ID (UUID).
 func findRolloutFile(pid int) (path string, threadID string) {
-	files := listOpenFiles(pid)
+	files := platform.P.ListOpenFiles(pid)
 
 	// Filename: rollout-2026-02-26T23-51-07-019c9aa5-8f55-7833-b235-d00a5faa09d0.jsonl
 	// Extract the trailing UUID (8-4-4-4-12 hex).
@@ -113,7 +96,7 @@ func findRolloutFile(pid int) (path string, threadID string) {
 func readRolloutStatus(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
-		return "unknown"
+		return model.StatusUnknown
 	}
 	defer f.Close()
 
@@ -128,18 +111,18 @@ func readRolloutStatus(path string) string {
 	}
 
 	if lastLine == "" {
-		return "unknown"
+		return model.StatusUnknown
 	}
 
 	var payload rolloutPayload
 	if err := json.Unmarshal([]byte(lastLine), &payload); err != nil {
-		return "unknown"
+		return model.StatusUnknown
 	}
 
 	if payload.Payload.Type == "task_complete" {
-		return "idle"
+		return model.StatusIdle
 	}
-	return "busy"
+	return model.StatusBusy
 }
 
 // lookupCodexThread queries the Codex SQLite database for thread metadata.

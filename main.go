@@ -7,20 +7,10 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+
+	"github.com/Eric-Song-Nop/agentstat/internal/agent"
+	"github.com/Eric-Song-Nop/agentstat/internal/model"
 )
-
-// AgentSession represents a single discovered agent session.
-type AgentSession struct {
-	Agent     string `json:"agent"`      // "opencode" | "codex" | "claude"
-	Status    string `json:"status"`     // "busy" | "idle" | "retry" | "unknown"
-	SessionID string `json:"session_id"`
-	Title     string `json:"title"`
-	Directory string `json:"directory"`
-	PID       int    `json:"pid"`
-}
-
-// allAgents lists the known agent names for validation.
-var allAgents = []string{"opencode", "codex", "claude"}
 
 // parseAgents parses a comma-separated agent list and validates names.
 // Returns nil if input is empty (meaning "all agents").
@@ -30,8 +20,8 @@ func parseAgents(raw string) map[string]bool {
 		return nil
 	}
 
-	known := make(map[string]bool, len(allAgents))
-	for _, a := range allAgents {
+	known := make(map[string]bool, len(model.AllAgents))
+	for _, a := range model.AllAgents {
 		known[a] = true
 	}
 
@@ -42,7 +32,7 @@ func parseAgents(raw string) map[string]bool {
 			continue
 		}
 		if !known[name] {
-			fmt.Fprintf(os.Stderr, "warning: unknown agent %q (known: %s)\n", name, strings.Join(allAgents, ", "))
+			fmt.Fprintf(os.Stderr, "warning: unknown agent %q (known: %s)\n", name, strings.Join(model.AllAgents, ", "))
 			continue
 		}
 		selected[name] = true
@@ -66,16 +56,16 @@ func main() {
 
 	agents := parseAgents(*agentsFlag)
 
-	var sessions []AgentSession
+	var sessions []model.AgentSession
 
 	if agentEnabled(agents, "opencode") {
-		sessions = append(sessions, discoverOpenCode()...)
+		sessions = append(sessions, agent.DiscoverOpenCode()...)
 	}
 	if agentEnabled(agents, "codex") {
-		sessions = append(sessions, discoverCodex()...)
+		sessions = append(sessions, agent.DiscoverCodex()...)
 	}
 	if agentEnabled(agents, "claude") {
-		sessions = append(sessions, discoverClaude()...)
+		sessions = append(sessions, agent.DiscoverClaude()...)
 	}
 
 	if len(sessions) == 0 {
