@@ -171,6 +171,12 @@ func probeClaudePID(pid int, pidMap map[int]string) *model.AgentSession {
 
 	status, slug, cwd := readClaudeStatus(info.JSONLPath)
 
+	// If the process is confirmed running but JSONL has no clear busy signal,
+	// treat it as idle (waiting for user input).
+	if status == model.StatusUnknown {
+		status = model.StatusIdle
+	}
+
 	title := slug
 	if title == "" {
 		title = "-"
