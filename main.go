@@ -11,7 +11,7 @@ import (
 
 // AgentSession represents a single discovered agent session.
 type AgentSession struct {
-	Agent     string `json:"agent"`      // "opencode" | "codex"
+	Agent     string `json:"agent"`      // "opencode" | "codex" | "claude"
 	Status    string `json:"status"`     // "busy" | "idle" | "retry" | "unknown"
 	SessionID string `json:"session_id"`
 	Title     string `json:"title"`
@@ -19,19 +19,64 @@ type AgentSession struct {
 	PID       int    `json:"pid"`
 }
 
+// allAgents lists the known agent names for validation.
+var allAgents = []string{"opencode", "codex", "claude"}
+
+// parseAgents parses a comma-separated agent list and validates names.
+// Returns nil if input is empty (meaning "all agents").
+func parseAgents(raw string) map[string]bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+
+	known := make(map[string]bool, len(allAgents))
+	for _, a := range allAgents {
+		known[a] = true
+	}
+
+	selected := make(map[string]bool)
+	for _, name := range strings.Split(raw, ",") {
+		name = strings.TrimSpace(strings.ToLower(name))
+		if name == "" {
+			continue
+		}
+		if !known[name] {
+			fmt.Fprintf(os.Stderr, "warning: unknown agent %q (known: %s)\n", name, strings.Join(allAgents, ", "))
+			continue
+		}
+		selected[name] = true
+	}
+	return selected
+}
+
+// agentEnabled reports whether the named agent should be discovered.
+// A nil selected map means all agents are enabled.
+func agentEnabled(selected map[string]bool, name string) bool {
+	if selected == nil {
+		return true
+	}
+	return selected[name]
+}
+
 func main() {
 	jsonFlag := flag.Bool("json", false, "output in JSON format")
+	agentsFlag := flag.String("agents", "", "comma-separated list of agents to discover (opencode,codex,claude); default: all")
 	flag.Parse()
+
+	agents := parseAgents(*agentsFlag)
 
 	var sessions []AgentSession
 
-	// Discover OpenCode instances
-	ocSessions := discoverOpenCode()
-	sessions = append(sessions, ocSessions...)
-
-	// Discover Codex instances
-	cxSessions := discoverCodex()
-	sessions = append(sessions, cxSessions...)
+	if agentEnabled(agents, "opencode") {
+		sessions = append(sessions, discoverOpenCode()...)
+	}
+	if agentEnabled(agents, "codex") {
+		sessions = append(sessions, discoverCodex()...)
+	}
+	if agentEnabled(agents, "claude") {
+		sessions = append(sessions, discoverClaude()...)
+	}
 
 	if len(sessions) == 0 {
 		if *jsonFlag {

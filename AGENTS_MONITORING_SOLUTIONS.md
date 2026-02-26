@@ -29,7 +29,7 @@ Each detection method is tagged with an invasiveness label:
 | **Codex** | CLI | Process + `/proc/fd` → rollout JSONL | Last line: `task_complete` → idle | 🟡 READ-INTERNAL | ★★★★☆ |
 | **Plandex** | CLI + Server | HTTP `localhost:8099` + PostgreSQL | API: plan status | 🟢 PASSIVE | ★★★★☆ |
 | **Cline CLI** | CLI | `--json` output + file watch | `ask` msg = idle, `say` msg = busy | 🔴 LAUNCH-FLAG / 🟡 READ-INTERNAL | ★★★☆☆ |
-| **Claude Code** | CLI | Process + file activity monitoring | CPU + `~/.claude/todos/` mtime | 🟢 PASSIVE | ★★★☆☆ |
+| **Claude Code** | CLI | Process + `/proc/fd` → session JSONL | Last line: `system`+`turn_duration` → idle | 🟡 READ-INTERNAL | ★★★★☆ |
 | **Copilot CLI** | CLI | ACP TCP mode (`--acp --port N`) | JSON-RPC over TCP | 🔴 LAUNCH-FLAG | ★★★☆☆ |
 | **Amp Code** | CLI | Process + file changes directory | `~/.amp/file-changes/` transaction mtime | 🟢 PASSIVE | ★★★☆☆ |
 | **Gemini CLI** | CLI | Process + checkpoint files | CPU + `~/.gemini/tmp/` mtime | 🟢 PASSIVE | ★★★☆☆ |
@@ -127,43 +127,56 @@ SELECT id, title, directory FROM session ORDER BY updated DESC;
 | **Process name** | `claude` |
 | **Config path** | `~/.claude/settings.json` |
 | **State path** | `~/.claude/` (~1.7GB total) |
-| **Task locks** | `~/.claude/tasks/{uuid}/.lock` (99 lock files) |
-| **Todos** | `~/.claude/todos/{uuid}-agent-{uuid}.json` |
-| **Transcripts** | `~/.claude/transcripts/ses_{id}.jsonl` |
+| **Task locks** | `~/.claude/tasks/{uuid}/.lock` (per-session lock held via fd) |
+| **Session JSONL** | `~/.claude/projects/{project-path-encoded}/{sessionId}.jsonl` |
 | **History** | `~/.claude/history.jsonl` |
 | **HTTP API** | None |
 | **Database** | None |
 
-**Status detection (combined approach):**
+**Status detection (recommended approach — `/proc/fd` + session JSONL):**
 
-1. 🟢 PASSIVE — **Find running instances:**
+1. 🟢 PASSIVE — **Process detection:**
    ```bash
-   ps aux | grep '[c]laude'
-   # Get PID, working directory from /proc/{pid}/cwd
+   # Scan /proc/*/cmdline, match first arg ending with /claude or equal to claude
+   ls /proc/[0-9]*/cmdline | while read f; do
+     arg0=$(tr '\0' '\n' < "$f" 2>/dev/null | head -1)
+     echo "$arg0" | grep -qE '(^|/)claude$' && echo "$f"
+   done
    ```
 
-2. 🟢 PASSIVE — **Determine busy/idle — CPU method:**
+2. 🟡 READ-INTERNAL — **PID → session UUID via `/proc/{pid}/fd`:**
    ```bash
-   # Read /proc/{pid}/stat, compute CPU delta over 1-2 seconds
-   # High CPU = busy (calling LLM or executing tools)
-   # Near-zero CPU = idle (waiting for user input)
+   # Claude holds .lock files open for each session it owns.
+   # A single PID may hold multiple locks (compact/inherited sessions).
+   readlink /proc/{pid}/fd/* 2>/dev/null | grep '\.claude/tasks/.*/\.lock'
+   # → /home/user/.claude/tasks/9a50ebfc-2e61-464f-b5fb-916d895b16f9/.lock
+   # Extract UUID from path — this is the session ID.
+   ```
+   > One PID can hold multiple session locks. Take the session whose JSONL has the most recent mtime.
+
+3. 🟡 READ-INTERNAL — **Session UUID → JSONL file:**
+   ```bash
+   # JSONL files live under ~/.claude/projects/{encoded-project-path}/
+   # The filename is {sessionId}.jsonl
+   find ~/.claude/projects -name "{sessionId}.jsonl"
+   # → ~/.claude/projects/-home-eric-Documents-Sources-acp-agents-status-collector/9a50ebfc-....jsonl
    ```
 
-3. 🟢 PASSIVE — **Determine busy/idle — file mtime method:**
+4. 🟡 READ-INTERNAL — **Status from last lines of session JSONL:**
    ```bash
-   # Watch ~/.claude/todos/ for recent file modification TIMES (not content)
-   # Watch ~/.claude/tasks/{id}/.lock for lock activity
-   # Recent write (< 5s) = busy
+   tail -1 /path/to/{sessionId}.jsonl | jq -r '.type, .subtype'
+   # type=system + subtype=turn_duration → idle (turn finished, waiting for user)
+   # type=assistant                      → busy (generating response / tool calls)
+   # type=user                           → busy (user submitted, awaiting response)
+   # type=progress / other               → search backwards for last meaningful line
    ```
-   > Only checks `stat()` mtime, does not read file content. Safe.
+   > Each JSONL line also contains `slug` (session title) and `cwd` (working directory).
 
-4. 🟡 READ-INTERNAL — **Determine busy/idle — transcript method:**
+5. 🟢 PASSIVE — **CWD fallback from `/proc`:**
    ```bash
-   # Find most recent transcript: ~/.claude/transcripts/ses_*.jsonl
-   # Check last line — if role is "assistant" and recent = busy
-   # If role is "user" prompt and old = idle
+   readlink /proc/{pid}/cwd
    ```
-   > Reads internal JSONL transcript format. May break if format changes.
+   > Used when JSONL does not contain a `cwd` field.
 
 ---
 
@@ -830,6 +843,7 @@ Agents with queryable local databases. **No startup changes needed, but reads un
 | Agent | Database | Query Target | Breakage Risk |
 |-------|----------|-------------|---------------|
 | OpenCode | `~/.local/share/opencode/opencode.db` | `session` table | Low (also has API) |
+| Claude Code | `/proc/{pid}/fd` → session JSONL | `type`+`subtype` in last line | **Medium** (file format stable, fd approach reliable) |
 | Codex | `/proc/{pid}/fd` → rollout JSONL | `payload.type` in last line | **Medium** (file format stable, fd approach reliable) |
 | Goose | `~/.config/goose/sessions.db` | sessions | Low (also has API) |
 | Cursor | `~/.config/Cursor/.../state.vscdb` | `composer.composerData` key | **High** (undocumented key) |
@@ -843,7 +857,6 @@ Watch file modification times to infer activity. **Fully passive — only `stat(
 
 | Agent | Files to Watch |
 |-------|---------------|
-| Claude Code | `~/.claude/todos/`, `~/.claude/tasks/`, `~/.claude/transcripts/` |
 | Amp Code | `~/.amp/file-changes/T-*/` |
 | Aider | `$CWD/.aider.chat.history.md` |
 | Gemini CLI | `~/.gemini/tmp/` |
@@ -869,7 +882,7 @@ DELTA=$((CPU2 - CPU1))
 # DELTA ≈ 0 → idle (waiting for input)
 ```
 
-Applicable to: Claude Code, Codex, Aider, Gemini CLI, Amazon Q, Cursor, Windsurf, Zed, Trae, Tabnine, Sourcery, any other local process.
+Applicable to: Aider, Gemini CLI, Amazon Q, Cursor, Windsurf, Zed, Trae, Tabnine, Sourcery, any other local process.
 
 ---
 
@@ -891,7 +904,7 @@ Applicable to: Claude Code, Codex, Aider, Gemini CLI, Amazon Q, Cursor, Windsurf
 For building the status collector, **prioritize methods that require zero changes to how agents are launched:**
 
 1. ✅ **Always use Tier 1 (API) when available** — OpenCode, Goose, OpenHands already expose APIs by default
-2. ✅ **Use Tier 3 (file mtime) as primary method** for agents without APIs — works on Claude Code, Amp, Aider, Gemini CLI, Amazon Q
+2. ✅ **Use Tier 3 (file mtime) as primary method** for agents without APIs — works on Amp, Aider, Gemini CLI, Amazon Q
 3. ✅ **Use Tier 4 (CPU heuristic) as universal fallback** — works on every local agent
 4. ⚠️ **Use Tier 2 (DB read) sparingly** — useful but fragile, needs version-specific adapters
 5. ❌ **Avoid Tier LAUNCH-FLAG methods** unless the user specifically opts in via a wrapper script
